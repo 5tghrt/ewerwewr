@@ -169,7 +169,7 @@ class PPOTrainer(BaseTrainer):
         # Step 0: check positional arguments validity
         if not isinstance(config, PPOConfig):
             raise ValueError(f"config must be a PPOConfig, got {type(config)}")
-        if not isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+        if (not isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))) and not getattr(model, "is_vision_model", False):
             raise ValueError(
                 f"tokenizer must be a PreTrainedTokenizer or PreTrainedTokenizerFast, got {type(tokenizer)}"
             )
@@ -209,7 +209,7 @@ class PPOTrainer(BaseTrainer):
                 f"architectures are: {SUPPORTED_ARCHITECTURES} "
             )
 
-        if not (isinstance(tokenizer, PreTrainedTokenizer) or isinstance(tokenizer, PreTrainedTokenizerFast)):
+        if (not isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))) and not getattr(model, "is_vision_model", False):
             raise ValueError(
                 "tokenizer must be a transformers.PreTrainedTokenizer or transformers.PreTrainedTokenizerFast"
             )

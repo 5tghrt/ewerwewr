@@ -7,7 +7,8 @@ from .import_utils import is_peft_available
 from .models import (
     AutoModelForCausalLMWithValueHead,
     AutoModelForSeq2SeqLMWithValueHead,
+    AutoModelForImageClassificationWithValueHead,
     PreTrainedModelWrapper,
     create_reference_model,
 )
-from .trainer import PPOConfig, PPOTrainer
+from .trainer import PPOConfig, PPOTrainer, PPOVisionTrainer
