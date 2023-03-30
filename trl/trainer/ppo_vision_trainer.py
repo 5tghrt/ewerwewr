@@ -93,23 +93,61 @@ class PPOVisionTrainer(PPOTrainer):
         # Step 2: compute the advantages
         rewards, non_score_reward = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
 
+        mini_batch_dict = {
+            "pixel_values": pixel_values,
+            "old_logprobs": all_logprobs,
+            "values": values,
+            "rewards": rewards,
+            "masks": masks,
+            "labels": labels,
+        }
+        mini_batch_data = Dataset.from_dict(mini_batch_dict)
+
+        def collator(data):
+            return_dict = dict()
+            for key in data[0]:
+                return_dict[key] = []
+                for d in data:
+                    if isinstance(d[key], list):
+                        return_dict[key].append(torch.Tensor(d[key]))
+                    elif isinstance(d[key], torch.Tensor):
+                        return_dict[key].append(d)
+                    else:
+                        return_dict[key].append(torch.Tensor([d[key]]))
+                return_dict[key] = torch.stack(return_dict[key]).to(self.accelerator.device)
+            return return_dict
+
+        mini_batch_dataloader = torch.utils.data.DataLoader(
+            mini_batch_data,
+            batch_size=self.config.mini_batch_size,
+            shuffle=True,
+            collate_fn=collator,
+        )
+
         # Step 3: PPO
         all_stats = []
         for _ in range(self.config.ppo_epochs):
-            logits, _, vpreds = self.model(pixel_values)
-            logprobs = logprobs_from_logits(logits, labels)
+            for batch in mini_batch_dataloader:
+                pixel_values = batch["pixel_values"]
+                old_logprobs = batch["old_logprobs"]
+                values = batch["values"]
+                masks = batch["masks"]
+                rewards = batch["rewards"]
+                labels = batch["labels"]
+                
+                logits, _, vpreds = self.model(pixel_values)
+                logprobs = logprobs_from_logits(logits, labels.long().squeeze(-1))
 
-            train_stats = self.train_minibatch(
-                all_logprobs,
-                values,
-                rewards,
-                logprobs,
-                logits,
-                vpreds,
-                masks.unsqueeze(-1),
-            )
-
-            all_stats.append(train_stats)
+                train_stats = self.train_minibatch(
+                    old_logprobs,
+                    values,
+                    rewards,
+                    logprobs,
+                    logits,
+                    vpreds,
+                    masks.unsqueeze(-1),
+                )
+                all_stats.append(train_stats)
         
         train_stats = stack_dicts(all_stats)
 
