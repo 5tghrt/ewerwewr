@@ -20,7 +20,7 @@ from typing import Callable, List, Optional, Union
 import datasets
 import torch
 from accelerate import Accelerator
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 from huggingface_hub import whoami
 from packaging import version
 from torch.optim import Adam
@@ -215,7 +215,7 @@ class PPOTrainer(BaseTrainer):
             )
         self.tokenizer = tokenizer
 
-        if dataset is not None and not (isinstance(dataset, torch.utils.data.Dataset) or isinstance(dataset, Dataset)):
+        if dataset is not None and not (isinstance(dataset, torch.utils.data.Dataset) or isinstance(dataset, (Dataset, DatasetDict))):
             raise ValueError("dataloader must be a torch.utils.data.Dataset or datasets.Dataset")
         elif dataset is None:
             warnings.warn(
@@ -932,7 +932,10 @@ class PPOTrainer(BaseTrainer):
             last_non_masked_index = mask.nonzero()[-1]
 
             # reward is preference model score + KL penalty
-            reward[last_non_masked_index] += score
+            if len(reward.shape) != 0:
+                reward[last_non_masked_index] += score
+            else:
+                reward += score.squeeze()
             rewards.append(reward)
         return torch.stack(rewards), torch.stack(non_score_rewards)
 

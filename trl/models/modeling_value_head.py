@@ -552,7 +552,7 @@ class AutoModelForImageClassificationWithValueHead(PreTrainedModelWrapper):
         logits = base_model_output.logits
         loss = base_model_output.loss
 
-        value = self.v_head(last_hidden_state).squeeze(-1)
+        value = self.v_head(last_hidden_state[:, 0, :]).squeeze(-1)
 
         # force upcast in fp32 if logits are in half-precision
         if logits.dtype != torch.float32:

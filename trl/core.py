@@ -92,8 +92,8 @@ def logprobs_from_logits(logits, labels):
     """
     See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
     """
-    logp = F.log_softmax(logits, dim=2)
-    logpy = torch.gather(logp, 2, labels.unsqueeze(2)).squeeze(-1)
+    logp = F.log_softmax(logits, dim=-1)
+    logpy = torch.gather(logp, -1, labels.unsqueeze(-1)).squeeze(-1)
     return logpy
 
 
