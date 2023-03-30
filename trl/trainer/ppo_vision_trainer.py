@@ -94,7 +94,7 @@ class PPOVisionTrainer(PPOTrainer):
 
         mini_batch_dict = {
             "pixel_values": pixel_values,
-            "old_logprobs": ref_logprobs,
+            "old_logprobs": all_logprobs,
             "values": values,
             "rewards": rewards,
             "masks": masks,
