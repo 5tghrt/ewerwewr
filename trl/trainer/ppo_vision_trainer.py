@@ -89,13 +89,12 @@ class PPOVisionTrainer(PPOTrainer):
 
         masks = torch.ones_like(all_logprobs)
     
-
         # Step 2: compute the advantages
         rewards, non_score_reward = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
 
         mini_batch_dict = {
             "pixel_values": pixel_values,
-            "old_logprobs": all_logprobs,
+            "old_logprobs": ref_logprobs,
             "values": values,
             "rewards": rewards,
             "masks": masks,
