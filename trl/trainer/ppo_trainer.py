@@ -265,33 +265,16 @@ class PPOTrainer(BaseTrainer):
         else:
             self.kl_ctl = FixedKLController(self.config.init_kl_coef)
 
-        # Safety checkers for DS integration
-        is_deepspeed_used = self.accelerator.distributed_type == "DEEPSPEED" and hasattr(
-            self.accelerator.state, "deepspeed_plugin"
-        )
-
         (
             self.model,
+            self.ref_model,
             self.optimizer,
             self.data_collator,
             self.dataloader,
             self.lr_scheduler,
         ) = self.accelerator.prepare(
-            self.model, self.optimizer, self.data_collator, self.dataloader, self.lr_scheduler
+            self.model, self.ref_model, self.optimizer, self.data_collator, self.dataloader, self.lr_scheduler
         )
-        if is_deepspeed_used:
-            # 8 bit models are already set on the correct device
-            if not getattr(self.ref_model.pretrained_model, "is_loaded_in_8bit", False):
-                # DS integration only allows for single model and as `ref_model` is only used for
-                # `KL devergence loss`,i.e, in eval model, just have it be on the respective device and
-                # there is no need to pass it to the `accelerator.prepare` call
-                self.ref_model = self.ref_model.to(self.accelerator.device)
-
-            # this hack seems to be needed for DS stage 3 to work
-            if self.accelerator.state.deepspeed_plugin.zero_stage == 3:
-                self.model.train()
-        else:
-            self.ref_model = self.accelerator.prepare(self.ref_model)
 
         # In a distributed setup, only logging needs to be performed on the main process
         # check: https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html
@@ -434,7 +417,8 @@ class PPOTrainer(BaseTrainer):
         outputs = []
 
         padding_side_default = self.tokenizer.padding_side
-        self.tokenizer.padding_side = "left"
+        if not self.is_encoder_decoder:
+            self.tokenizer.padding_side = "left"
 
         # in case we have fewer examples than bs
         batch_size = min(len(query_tensors), batch_size)
@@ -461,7 +445,11 @@ class PPOTrainer(BaseTrainer):
             generations = self.accelerator.unwrap_model(self.model).generate(**padded_inputs, **generation_kwargs)
 
             for generation, mask in zip(generations, padded_inputs["attention_mask"]):
-                output = generation[(1 - mask).sum() :]  # remove padding
+                if not self.is_encoder_decoder:
+                    output = generation[(1 - mask).sum() :]  # remove padding
+                else:
+                    output = generation
+
                 if not return_prompt and not self.is_encoder_decoder:
                     output = output[(mask).sum() :]  # remove prompt
                 outputs.append(output)
@@ -592,12 +580,11 @@ class PPOTrainer(BaseTrainer):
         rewards, non_score_reward = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
         timing["time/ppo/compute_rewards"] = time.time() - t
 
-        # upcast to float32 to avoid dataset issues
         mini_batch_dict = {
             "queries": queries,
             "responses": responses,
-            "logprobs": all_logprobs.to(torch.float32),
-            "values": values.to(torch.float32),
+            "logprobs": all_logprobs,
+            "values": values,
             "rewards": rewards,
             "masks": masks,
         }
@@ -643,14 +630,12 @@ class PPOTrainer(BaseTrainer):
                     vpreds,
                     batch["masks"],
                 )
+                if self.config.early_stopping and train_stats["policy/policykl"] > 1.5 * self.config.target_kl:
+                    early_stop = True
+                    self.optimizer.zero_grad()
+                    break
 
                 all_stats.append(train_stats)
-
-                if self.config.early_stopping:
-                    policykl = train_stats["policy/policykl"]
-                    early_stop = self._early_stop(policykl)
-                    if early_stop:
-                        break
 
         timing["time/ppo/optimize_step"] = time.time() - t
 
@@ -693,41 +678,6 @@ class PPOTrainer(BaseTrainer):
             self.lr_scheduler.step()
 
         return stats
-
-    def _early_stop(self, policykl):
-        r"""
-        Handles the early stopping logic. If the policy KL is greater than the target KL, then the gradient is zeroed and
-        the optimization step is skipped.
-        This also handles the multi-gpu case where the policy KL is averaged across all processes.
-
-        Args:
-            policy_kl (torch.Tensor):
-                the policy KL
-
-        Returns:
-            `bool`: whether to early stop or not
-        """
-        early_stop = False
-        if not self.config.early_stopping:
-            return early_stop
-
-        if not self.is_distributed and policykl > 1.5 * self.config.target_kl:
-            self.optimizer.zero_grad()
-            early_stop = True
-        elif self.is_distributed:
-            import torch.distributed as dist
-
-            # Wait for all processes to finish
-            dist.barrier()
-
-            # all gather the policykl
-            dist.all_reduce(policykl, dist.ReduceOp.SUM)
-            policykl /= self.accelerator.num_processes
-
-            if policykl > 1.5 * self.config.target_kl:
-                self.optimizer.zero_grad()
-                early_stop = True
-        return early_stop
 
     def gather_stats(self, stats):
         """
@@ -1080,6 +1030,38 @@ class PPOTrainer(BaseTrainer):
         stats["ppo/val/var_explained"] = 1 - stats["ppo/val/error"] / stats["ppo/returns/var"]
         return stats
 
+    
+    def _gather_responses_queries(self, batch: dict):
+        """
+        Gather the responses and queries from the batch.
+
+        Args:
+            batch (dict[str, Any]):
+                A dictionary of batch data, this contains the queries and responses.
+
+        Returns:
+            responses (`torch.Tensor`):
+                A tensor of responses.
+            queries (`torch.Tensor`):
+                A tensor of queries.
+        """
+        responses = batch["response"]
+        queries = batch["query"]
+
+        # tokenize the responses and queries
+        responses = self.tokenizer(responses, return_tensors="pt", padding=True, truncation=True).input_ids
+        queries = self.tokenizer(queries, return_tensors="pt", padding=True, truncation=True).input_ids
+        
+        responses = self.accelerator.gather(responses)
+        queries = self.accelerator.gather(queries)
+
+        # decode the responses and queries
+        responses = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
+        queries = self.tokenizer.batch_decode(queries, skip_special_tokens=True)
+
+        return responses, queries
+
+
     def log_stats(
         self,
         stats: dict,
@@ -1097,6 +1079,20 @@ class PPOTrainer(BaseTrainer):
             rewards (`List[torch.FloatTensor]`):
                 A tensor of rewards.
         """
+        if self.is_distributed:
+            import torch.distributed as dist
+
+            dist.barrier()
+
+            responses, queries = self._gather_responses_queries(batch)
+            batch["response"] = responses
+            batch["query"] = queries
+
+            # gather rewards
+            rewards = self.accelerator.gather(rewards)
+            rewards = torch.cat(rewards, dim=0)
+
+
         # Log only if we are in the main process
         if self.accelerator.is_main_process:
             logs = {}
